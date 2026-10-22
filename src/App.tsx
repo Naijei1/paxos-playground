@@ -146,11 +146,11 @@ export function App() {
 
   return (
     <div className="mx-auto min-h-screen max-w-[1280px] px-4 py-5 sm:px-6 lg:px-8">
-      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-4">
-        <div>
+      <header className="flex flex-col gap-4 border-b border-line pb-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="max-w-xl">
           <p className="text-xs font-semibold tracking-[0.16em] text-clay uppercase">Single decree</p>
           <h1 className="font-serif text-3xl leading-tight text-ink sm:text-4xl">Paxos playground</h1>
-          <p className="mt-1 max-w-xl text-sm text-muted">
+          <p className="mt-1 text-sm text-muted">
             Five servers, one decision. You are the network: deliver, delay, or drop each message.
           </p>
         </div>
