@@ -97,6 +97,37 @@ export type Decision = {
 
 export type PartitionMode = "hold" | "drop";
 
+export type DiagramKind = "promise" | "accept" | "learn" | "crash" | "restart" | "partition";
+
+export type DiagramEvent = {
+  id: string;
+  time: number;
+  server: ServerId;
+  kind: DiagramKind;
+  label: string;
+  detail: string;
+  partition?: number;
+};
+
+export type DiagramArrow = {
+  messageId: string;
+  type: MessageType;
+  from: ServerId;
+  to: ServerId;
+  label: string;
+  detail: string;
+  sendTime: number;
+  endTime: number | null;
+  status: "inflight" | "delivered" | "dropped";
+};
+
+export type Diagram = {
+  clock: number;
+  events: DiagramEvent[];
+  arrows: DiagramArrow[];
+  chosenAt: { time: number; label: string; detail: string } | null;
+};
+
 export type ScenarioId = "free" | "first" | "crash" | "unfinished" | "partition" | "duel";
 
 export type World = {
@@ -107,6 +138,7 @@ export type World = {
   accepts: AcceptRecord[];
   chosen: Decision | null;
   partitionMode: PartitionMode;
+  diagram: Diagram;
   msgSeq: number;
   logSeq: number;
 };

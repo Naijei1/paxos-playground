@@ -39,6 +39,34 @@ function expectSafe(world: World): void {
   if (errors.length) throw new Error(errors.join("; "));
 }
 
+describe("timeline", () => {
+  it("keeps in-flight arrows until delivery or a drop", () => {
+    let world = propose(createWorld(), "A", "red");
+    expect(world.diagram.arrows.filter((arrow) => arrow.status === "inflight")).toHaveLength(4);
+    expect(world.diagram.events.some((event) => event.kind === "promise" && event.server === "A")).toBe(true);
+    const first = world.queue[0]!;
+    world = deliver(world, first.id);
+    expect(world.diagram.arrows.find((arrow) => arrow.messageId === first.id)?.status).toBe("delivered");
+    const second = world.queue[0]!;
+    world = drop(world, second.id);
+    const dropped = world.diagram.arrows.find((arrow) => arrow.messageId === second.id);
+    expect(dropped?.status).toBe("dropped");
+    expect(dropped?.endTime).not.toBeNull();
+    world = crash(world, "B");
+    expect(world.diagram.events.some((event) => event.kind === "crash" && event.server === "B")).toBe(true);
+    world = restart(world, "B");
+    expect(world.diagram.events.some((event) => event.kind === "restart" && event.server === "B")).toBe(true);
+    expectSafe(world);
+  });
+
+  it("marks the time a majority accepts", () => {
+    const world = pump(propose(createWorld(), "A", "Withdraw $80"));
+    expect(world.diagram.chosenAt?.label).toContain("Withdraw $80");
+    expect(world.diagram.chosenAt?.time).toBeGreaterThan(0);
+    expectSafe(world);
+  });
+});
+
 describe("ballots", () => {
   it("orders by round, then by server letter", () => {
     const lower = { round: 1, serverId: "E" as const };

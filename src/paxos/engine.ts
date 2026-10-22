@@ -6,6 +6,8 @@ import {
   type AcceptedValue,
   type Ballot,
   type LogTone,
+  type DiagramArrow,
+  type DiagramEvent,
   type Message,
   type PartitionMode,
   type PromiseInfo,
@@ -29,6 +31,7 @@ export function createWorld(): World {
     accepts: [],
     chosen: null,
     partitionMode: "hold",
+    diagram: { clock: 0, events: [], arrows: [], chosenAt: null },
     msgSeq: 1,
     logSeq: 1,
   };
@@ -99,16 +102,88 @@ export function describeMessage(message: Message): string {
   }
 }
 
+function compactValue(value: string): string {
+  return value.replace(/^Withdraw /, "");
+}
+
+export function arrowLabel(message: Pick<Message, "type" | "ballot" | "value">): string {
+  const ballot = formatBallot(message.ballot);
+  switch (message.type) {
+    case "prepare":
+      return `Prepare ${ballot}`;
+    case "promise":
+      return "Promise";
+    case "nack":
+      return "Nack";
+    case "accept":
+      return `Accept(${ballot},${compactValue(message.value ?? "")})`;
+    case "accepted":
+      return "Accepted";
+    case "learn":
+      return message.value ? `Learn(${compactValue(message.value)})` : "Learn";
+  }
+}
+
+function markNew(world: World, event: Omit<DiagramEvent, "id" | "time">): number {
+  const time = ++world.diagram.clock;
+  world.diagram.events.push({ ...event, id: `d${world.diagram.events.length + 1}`, time });
+  return time;
+}
+
+function markHere(world: World, event: Omit<DiagramEvent, "id" | "time">): void {
+  world.diagram.events.push({
+    ...event,
+    id: `d${world.diagram.events.length + 1}`,
+    time: world.diagram.clock,
+  });
+}
+
+function rememberArrow(world: World, arrow: DiagramArrow): void {
+  world.diagram.arrows.push(arrow);
+}
+
 function enqueue(world: World, message: Omit<Message, "id">): void {
+  const id = `m${world.msgSeq++}`;
+  const label = arrowLabel(message);
+  const time = ++world.diagram.clock;
   if (partitioned(world, message.from, message.to) && world.partitionMode === "drop") {
-    log(
-      world,
-      `${describeMessage({ ...message, id: "x" })} was dropped at send time because ${message.from} and ${message.to} are in different partitions.`,
-      "warn",
-    );
+    const detail = `${describeMessage({ ...message, id })} was dropped at send time because ${message.from} and ${message.to} are in different partitions.`;
+    rememberArrow(world, {
+      messageId: id,
+      type: message.type,
+      from: message.from,
+      to: message.to,
+      label,
+      detail,
+      sendTime: time,
+      endTime: time,
+      status: "dropped",
+    });
+    log(world, detail, "warn");
     return;
   }
-  world.queue.push({ ...message, id: `m${world.msgSeq++}` });
+  rememberArrow(world, {
+    messageId: id,
+    type: message.type,
+    from: message.from,
+    to: message.to,
+    label,
+    detail: `${message.from} sent ${label} to ${message.to}. It is still in flight.`,
+    sendTime: time,
+    endTime: null,
+    status: "inflight",
+  });
+  world.queue.push({ ...message, id });
+}
+
+function finishArrow(world: World, message: Message, status: "delivered" | "dropped", detail: string): void {
+  const time = ++world.diagram.clock;
+  const arrow = world.diagram.arrows.find((item) => item.messageId === message.id);
+  if (arrow) {
+    arrow.status = status;
+    arrow.endTime = time;
+    arrow.detail = detail;
+  }
 }
 
 export type DeliveryBlock = "offline" | "held";
@@ -172,6 +247,13 @@ function recordAccept(world: World, acceptor: ServerId, ballot: Ballot, value: s
       text += ` ${bits.join("; ")}. A different last-accepted value does not undo the choice, and it was never chosen unless its own ballot reached a majority.`;
     }
     log(world, text, "good");
+    if (!world.diagram.chosenAt) {
+      world.diagram.chosenAt = {
+        time: world.diagram.clock,
+        label: `chosen “${value}”`,
+        detail: text,
+      };
+    }
   }
 }
 
@@ -267,6 +349,12 @@ function beginPhase2(world: World, proposer: ServerState): void {
   const ballot = proposal.ballot;
   if (tryAccept(proposer, ballot, value)) {
     recordAccept(world, proposer.id, ballot, value);
+    markHere(world, {
+      server: proposer.id,
+      kind: "accept",
+      label: `accepted ${value.replace(/^Withdraw /, "")}`,
+      detail: `${proposer.id}'s own acceptor accepted "${value}" at ballot ${formatBallot(ballot)}.`,
+    });
     if (proposer.proposal?.phase === "accepting") proposer.proposal.accepts.push(proposer.id);
     log(
       world,
@@ -353,6 +441,12 @@ export function propose(world: World, id: ServerId, rawValue: string): World {
   const prior = previous
     ? `${id} had already accepted "${previous.value}" at ${formatBallot(previous.ballot)}, and its own promise reports that`
     : `${id} has not accepted anything yet`;
+  markNew(next, {
+    server: id,
+    kind: "promise",
+    label: `promised ${formatBallot(ballot)}`,
+    detail: `${id}'s acceptor promises ballot ${formatBallot(ballot)} immediately. ${prior}.`,
+  });
   log(
     next,
     `${id} starts ballot ${formatBallot(ballot)} proposing "${value}". Ballots order by round, then by server letter, so ${formatBallot(ballot)} is higher than every ballot ${id} has seen. ${id}'s acceptor promises it immediately (${prior}). Prepare goes to the other servers.`,
@@ -406,6 +500,12 @@ function onPrepare(world: World, message: Message): void {
 
   const prior = acceptor.accepted;
   acceptor.promised = message.ballot;
+  markHere(world, {
+    server: acceptor.id,
+    kind: "promise",
+    label: `promised ${formatBallot(message.ballot)}`,
+    detail: `${acceptor.id} promises ballot ${formatBallot(message.ballot)}. ${acceptedPhrase(prior)}`,
+  });
   enqueue(world, {
     type: "promise",
     from: acceptor.id,
@@ -526,6 +626,12 @@ function onAccept(world: World, message: Message): void {
     return;
   }
   recordAccept(world, acceptor.id, message.ballot, value);
+  markHere(world, {
+    server: acceptor.id,
+    kind: "accept",
+    label: `accepted ${value.replace(/^Withdraw /, "")}`,
+    detail: `${acceptor.id} accepts "${value}" at ballot ${formatBallot(message.ballot)}.`,
+  });
   enqueue(world, {
     type: "accepted",
     from: acceptor.id,
@@ -571,6 +677,12 @@ function onLearn(world: World, message: Message): void {
   noteBallot(learner, message.ballot);
   const previous = learner.learned;
   learner.learned = { ballot: message.ballot, value };
+  markHere(world, {
+    server: learner.id,
+    kind: "learn",
+    label: "learned",
+    detail: `${learner.id} learns that "${value}" was chosen at ballot ${formatBallot(message.ballot)}.`,
+  });
   if (previous && previous.value !== value) {
     log(
       world,
@@ -604,25 +716,23 @@ export function deliver(world: World, messageId: string): World {
       return next;
     }
     next.queue.splice(index, 1);
-    log(
-      next,
-      `Dropped ${describeMessage(message)} because ${message.from} and ${message.to} are partitioned.`,
-      "warn",
-    );
+    const detail = `Dropped ${describeMessage(message)} because ${message.from} and ${message.to} are partitioned.`;
+    finishArrow(next, message, "dropped", detail);
+    log(next, detail, "warn");
     return next;
   }
 
   next.queue.splice(index, 1);
   const recipient = server(next, message.to);
   if (!recipient.online) {
-    log(
-      next,
-      `Dropped ${describeMessage(message)} because ${message.to} is offline. A crashed server ignores incoming messages. Promised and accepted state stay on disk; the in-flight proposal and the learned decision do not.`,
-      "warn",
-    );
+    const detail = `Dropped ${describeMessage(message)} because ${message.to} is offline. A crashed server ignores incoming messages. Promised and accepted state stay on disk; the in-flight proposal and the learned decision do not.`;
+    finishArrow(next, message, "dropped", detail);
+    log(next, detail, "warn");
     return next;
   }
 
+  const before = next.log.length;
+  finishArrow(next, message, "delivered", `${message.to} received ${arrowLabel(message)} from ${message.from}.`);
   switch (message.type) {
     case "prepare":
       onPrepare(next, message);
@@ -643,6 +753,12 @@ export function deliver(world: World, messageId: string): World {
       onLearn(next, message);
       break;
   }
+  const detail = next.log
+    .slice(before)
+    .map((entry) => entry.text)
+    .join(" ");
+  const arrow = next.diagram.arrows.find((item) => item.messageId === message.id);
+  if (arrow && detail) arrow.detail = detail;
   return next;
 }
 
@@ -663,7 +779,9 @@ export function drop(world: World, messageId: string): World {
   const next = draft(world);
   const [message] = next.queue.splice(index, 1);
   if (!message) return world;
-  log(next, `Dropped ${describeMessage(message)}. It will never be delivered.`, "warn");
+  const detail = `Dropped ${describeMessage(message)}. It will never be delivered.`;
+  finishArrow(next, message, "dropped", detail);
+  log(next, detail, "warn");
   return next;
 }
 
@@ -680,11 +798,9 @@ export function crash(world: World, id: ServerId): World {
       ? `last accepted "${target.accepted.value}" at ${formatBallot(target.accepted.ballot)}`
       : "nothing accepted",
   ].join(", ");
-  log(
-    next,
-    `${id} crashes. Disk keeps ${disk}. The in-flight proposal and ${id}'s view of the chosen value are wiped. Messages already in the network stay there, and anything delivered to ${id} while it is down is dropped.`,
-    "bad",
-  );
+  const detail = `${id} crashes. Disk keeps ${disk}. The in-flight proposal and ${id}'s view of the chosen value are wiped. Messages already in the network stay there, and anything delivered to ${id} while it is down is dropped.`;
+  markNew(next, { server: id, kind: "crash", label: "crash", detail });
+  log(next, detail, "bad");
   return next;
 }
 
@@ -699,11 +815,9 @@ export function restart(world: World, id: ServerId): World {
       ? `it still has "${target.accepted.value}" accepted at ${formatBallot(target.accepted.ballot)}`
       : "it has no accepted value",
   ].join(", and ");
-  log(
-    next,
-    `${id} restarts. ${disk}. It does not remember whether a value was chosen until a Learn message arrives or it proposes again and hears a majority.`,
-    "good",
-  );
+  const detail = `${id} restarts. ${disk}. It does not remember whether a value was chosen until a Learn message arrives or it proposes again and hears a majority.`;
+  markNew(next, { server: id, kind: "restart", label: "restart", detail });
+  log(next, detail, "good");
   return next;
 }
 
@@ -713,11 +827,9 @@ export function setPartition(world: World, id: ServerId, partition: number): Wor
   if (target.partition === group) return world;
   const next = draft(world);
   server(next, id).partition = group;
-  log(
-    next,
-    `${id} moves to partition ${group}. Messages between different partitions are ${next.partitionMode === "hold" ? "held in the queue" : "dropped"}. A majority is still 3 of all 5 servers, not 3 of whoever is nearby.`,
-    "warn",
-  );
+  const detail = `${id} moves to partition ${group}. Messages between different partitions are ${next.partitionMode === "hold" ? "held in the queue" : "dropped"}. A majority is still 3 of all 5 servers, not 3 of whoever is nearby.`;
+  markNew(next, { server: id, kind: "partition", label: `side ${group}`, detail, partition: group });
+  log(next, detail, "warn");
   return next;
 }
 
@@ -737,8 +849,20 @@ export function setPartitionMode(world: World, mode: PartitionMode): World {
 
 export function splitThreeTwo(world: World): World {
   const next = draft(world);
+  const time = ++next.diagram.clock;
   for (const item of next.servers) {
-    item.partition = item.id === "D" || item.id === "E" ? 2 : 1;
+    const partition = item.id === "D" || item.id === "E" ? 2 : 1;
+    if (item.partition === partition) continue;
+    item.partition = partition;
+    next.diagram.events.push({
+      id: `d${next.diagram.events.length + 1}`,
+      time,
+      server: item.id,
+      kind: "partition",
+      label: `side ${partition}`,
+      detail: `${item.id} is now on side ${partition} of a 3/2 split.`,
+      partition,
+    });
   }
   log(
     next,
@@ -751,7 +875,20 @@ export function splitThreeTwo(world: World): World {
 export function heal(world: World): World {
   if (world.servers.every((item) => item.partition === 1)) return world;
   const next = draft(world);
-  for (const item of next.servers) item.partition = 1;
+  const time = ++next.diagram.clock;
+  for (const item of next.servers) {
+    if (item.partition === 1) continue;
+    item.partition = 1;
+    next.diagram.events.push({
+      id: `d${next.diagram.events.length + 1}`,
+      time,
+      server: item.id,
+      kind: "partition",
+      label: "side 1",
+      detail: `${item.id} rejoins side 1. Held messages can now be delivered.`,
+      partition: 1,
+    });
+  }
   log(
     next,
     "The partitions heal. Every server is in partition 1 again. Held messages between the old sides can now be delivered.",
@@ -762,6 +899,10 @@ export function heal(world: World): World {
 
 export function withIntro(world: World, intro: string, clearProposals = false): World {
   const next = draft(world);
+  for (const message of next.queue) {
+    const detail = `${arrowLabel(message)} from ${message.from} to ${message.to} was lost before this scenario handed you the controls.`;
+    finishArrow(next, message, "dropped", detail);
+  }
   next.queue = [];
   next.events = [];
   next.log = [{ id: `l${next.logSeq++}`, tone: "key", text: intro }];
@@ -801,5 +942,9 @@ export function checkInvariants(world: World): string[] {
   }
   const ids = world.queue.map((message) => message.id);
   if (new Set(ids).size !== ids.length) errors.push("duplicate message ids");
+  const inflight = world.diagram.arrows.filter((arrow) => arrow.status === "inflight").map((arrow) => arrow.messageId);
+  if (inflight.length !== ids.length || inflight.some((id) => !ids.includes(id))) {
+    errors.push("in-flight arrows do not match the message queue");
+  }
   return errors;
 }
