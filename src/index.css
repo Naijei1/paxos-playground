@@ -23,6 +23,26 @@
 html {
   background: var(--color-paper);
   color: var(--color-ink);
+  scrollbar-gutter: stable;
+}
+
+.no-anchor {
+  overflow-anchor: none;
+}
+
+svg .arrow-hit,
+svg .arrow-hit:focus,
+svg .arrow-hit:focus-visible {
+  outline: none;
+}
+
+svg .arrow-focus {
+  opacity: 0;
+}
+
+svg .arrow-hit.is-selected .arrow-focus,
+svg .arrow-hit:focus-visible .arrow-focus {
+  opacity: 1;
 }
 
 body {
