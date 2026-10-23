@@ -190,9 +190,7 @@ svg .arrow-hit:focus-visible .arrow-focus {
 }
 
 .challenge-copy {
-  height: 18.5rem;
-  min-height: 18.5rem;
-  overflow: auto;
+  min-height: 11rem;
 }
 
 @media (min-width: 48rem) {
@@ -205,8 +203,7 @@ svg .arrow-hit:focus-visible .arrow-focus {
   }
 
   .challenge-copy {
-    height: 11.75rem;
-    min-height: 11.75rem;
+    min-height: 5.5rem;
   }
 }
 

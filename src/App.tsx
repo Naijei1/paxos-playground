@@ -440,7 +440,7 @@ function ServerGroup({
   onMove: (id: ServerId) => void;
 }) {
   return (
-    <div className="rounded-2xl border border-line bg-paper px-3 py-2">
+    <div className="min-h-[4.75rem] rounded-2xl border border-line bg-paper px-3 py-2">
       <p className="text-xs font-semibold tracking-wide text-muted uppercase">{title}</p>
       {servers.length === 0 ? (
         <p className="mt-1 text-sm text-muted">{empty}</p>
