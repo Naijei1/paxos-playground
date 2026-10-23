@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { popoverBox } from "./popover";
 import { deliveryBlock } from "./paxos/engine";
 import { messageRole, serverRoleLine, serverRoleTag, type RoleKind } from "./paxos/roles";
 import { SERVER_IDS, type DiagramArrow, type ServerId, type World } from "./paxos/types";
@@ -101,7 +102,7 @@ export function Timeline({
                 type="button"
                 aria-pressed={pressed}
                 aria-label={server ? serverRoleLine(server) : id}
-                className={`flex w-full flex-col items-center justify-center font-serif ${pressed ? "text-ink" : "text-muted"}`}
+                className={`btn btn-row flex w-full flex-col items-center justify-center font-serif ${pressed ? "text-ink" : "btn-ghost"}`}
                 style={{ height: ROW }}
                 onClick={() => onSelectServer(id)}
               >
@@ -204,6 +205,16 @@ export function Timeline({
                   onFocus={() => onHover({ title: `${mark.server} · ${mark.label}`, detail: mark.detail })}
                   onClick={() => onHover({ title: `${mark.server} · ${mark.label}`, detail: mark.detail })}
                 >
+                  <circle
+                    className="arrow-focus"
+                    cx={xOf(mark.time)}
+                    cy={yOf(mark.server) - 14 - mark.stack * 14}
+                    r={12}
+                    fill="none"
+                    stroke="#1d4e89"
+                    strokeWidth={2}
+                    pointerEvents="none"
+                  />
                   <Mark x={xOf(mark.time)} y={yOf(mark.server) - 14 - mark.stack * 14} kind={mark.kind} />
                   <text x={xOf(mark.time) + 7} y={yOf(mark.server) - 10 - mark.stack * 13} fontSize="11" fill="#5e574e" pointerEvents="none">
                     {compactDiagramText(mark.label)}
@@ -221,27 +232,25 @@ export function Timeline({
               >
                 <button
                   type="button"
-                  className="rounded-full bg-ink px-2.5 py-1 text-xs font-semibold text-card disabled:opacity-40"
+                  className="btn btn-ink rounded-full px-2.5 py-1 text-xs font-semibold"
                   disabled={deliveryBlock(world, queued) === "held" || packet !== null}
                   onClick={() => onDeliver(queued.id)}
                 >
-                  {!world.servers.find((item) => item.id === queued.to)?.online && deliveryBlock(world, queued) !== "held"
-                    ? "Deliver (drops)"
-                    : "Deliver"}
+                  {packet !== null
+                    ? "Sending…"
+                    : !world.servers.find((item) => item.id === queued.to)?.online && deliveryBlock(world, queued) !== "held"
+                      ? "Deliver (drops)"
+                      : "Deliver"}
                 </button>
                 <button
                   type="button"
-                  className="rounded-full px-2.5 py-1 text-xs font-semibold text-ink disabled:opacity-40"
+                  className="btn btn-ghost rounded-full px-2.5 py-1 text-xs font-semibold"
                   disabled={world.queue[world.queue.length - 1]?.id === queued.id}
                   onClick={() => onDelay(queued.id)}
                 >
                   Delay
                 </button>
-                <button
-                  type="button"
-                  className="rounded-full bg-wine px-2.5 py-1 text-xs font-semibold text-card"
-                  onClick={() => onDrop(queued.id)}
-                >
+                <button type="button" className="btn btn-wine rounded-full px-2.5 py-1 text-xs font-semibold" onClick={() => onDrop(queued.id)}>
                   Drop
                 </button>
                 {deliveryBlock(world, queued) === "held" ? <span className="px-1 text-[11px] text-gold">Held</span> : null}
@@ -288,28 +297,6 @@ function PacketDot({
       </text>
     </g>
   );
-}
-
-function popoverBox(
-  arrow: DiagramArrow,
-  xOf: (time: number) => number,
-  yOf: (id: ServerId) => number,
-  nowX: number,
-  width: number,
-  height: number,
-) {
-  const x1 = xOf(arrow.sendTime);
-  const y1 = yOf(arrow.from);
-  const x2 = arrow.status === "inflight" ? nowX : endX(arrow, xOf);
-  const y2 = yOf(arrow.to);
-  const midX = (x1 + x2) / 2;
-  const lowY = Math.max(y1, y2);
-  const highY = Math.min(y1, y2);
-  const boxWidth = 230;
-  const left = Math.min(Math.max(midX - boxWidth / 2, 8), Math.max(8, width - boxWidth - 8));
-  const below = lowY + 12;
-  const top = below + 36 < height ? below : Math.max(8, highY - 40);
-  return { left, top };
 }
 
 function ArrowGlyph({
