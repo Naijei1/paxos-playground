@@ -1,13 +1,15 @@
-import { useEffect, useReducer, useState } from "react";
-import { Timeline } from "./Timeline";
+import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
+import { RoleGlyph } from "./RoleGlyph";
+import { Timeline, type Packet } from "./Timeline";
+import { nextHover, type HoverState } from "./hover";
 import { formatBallot } from "./paxos/ballot";
 import {
   crash,
   delay,
   deliver,
-  deliveryBlock,
   drop,
   heal,
+  isolate,
   nextAutoMessage,
   propose,
   restart,
@@ -15,6 +17,7 @@ import {
   setPartitionMode,
   splitThreeTwo,
 } from "./paxos/engine";
+import { ROLE_LEGEND, serverRoleLine } from "./paxos/roles";
 import {
   SCENARIOS,
   hashForScenario,
@@ -29,8 +32,6 @@ import { MAJORITY, SERVER_IDS, type ScenarioId, type ServerId, type World } from
 const PRESETS = ["Withdraw $80", "Withdraw $50", "red", "blue"] as const;
 
 type Pin = { kind: "server"; id: ServerId } | { kind: "message"; id: string };
-
-type Hover = { title: string; detail: string; messageId?: string } | null;
 
 type AppState = {
   scenario: ScenarioId;
@@ -96,7 +97,10 @@ export function App() {
   const done = isComplete(scenario, world);
   const server = world.servers.find((item) => item.id === state.selected) ?? world.servers[0]!;
   const [pin, setPin] = useState<Pin>({ kind: "server", id: server.id });
-  const [hover, setHover] = useState<Hover>(null);
+  const [hover, setHover] = useState<HoverState>(null);
+  const [packet, setPacket] = useState<Packet | null>(null);
+  const flying = useRef(false);
+  const raf = useRef(0);
   const showNetwork = scenario === "free" || scenario === "partition";
 
   useEffect(() => {
@@ -130,10 +134,10 @@ export function App() {
     setHover(null);
   }, [scenario]);
 
+  useEffect(() => () => cancelAnimationFrame(raf.current), []);
+
   const mutate = (op: (world: World) => World) => dispatch({ type: "mutate", op });
   const pinnedMessage = pin.kind === "message" ? world.diagram.arrows.find((arrow) => arrow.messageId === pin.id) : undefined;
-  const activeMessageId = hover?.messageId ?? (pin.kind === "message" ? pin.id : undefined);
-  const activeQueued = activeMessageId ? world.queue.find((message) => message.id === activeMessageId) : undefined;
   const explanation =
     hover?.detail ??
     pinnedMessage?.detail ??
@@ -144,18 +148,51 @@ export function App() {
     }`;
   const explanationTitle = hover?.title ?? (pinnedMessage ? `${pinnedMessage.label} ${pinnedMessage.from} → ${pinnedMessage.to}` : `Server ${server.id}`);
 
-  const activateMessage = (messageId: string) => {
-    const message = world.queue.find((item) => item.id === messageId);
-    if (!message || deliveryBlock(world, message) === "held") {
-      setPin({ kind: "message", id: messageId });
+  const onHover = (info: HoverState) => setHover((current) => nextHover(current, info));
+
+  const startFlight = (messageId: string) => {
+    if (flying.current) return;
+    if (!world.queue.some((message) => message.id === messageId)) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      mutate((current) => deliver(current, messageId));
       return;
     }
-    setPin({ kind: "message", id: messageId });
-    mutate((current) => deliver(current, messageId));
+    flying.current = true;
+    const started = performance.now();
+    const duration = 560;
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - started) / duration);
+      setPacket({ messageId, progress });
+      if (progress < 1) {
+        raf.current = requestAnimationFrame(tick);
+        return;
+      }
+      flying.current = false;
+      setPacket(null);
+      dispatch({ type: "mutate", op: (current) => deliver(current, messageId) });
+    };
+    raf.current = requestAnimationFrame(tick);
   };
 
+  const network = (
+    <NetworkControls
+      world={world}
+      selected={server.id}
+      onHeal={() => mutate(heal)}
+      onSplit={() => mutate(splitThreeTwo)}
+      onIsolate={() => mutate((current) => isolate(current, server.id))}
+      onMove={(id) =>
+        mutate((current) => {
+          const live = current.servers.find((item) => item.id === id);
+          return setPartition(current, id, live && live.partition === 1 ? 2 : 1);
+        })
+      }
+      onMode={(mode) => mutate((current) => setPartitionMode(current, mode))}
+    />
+  );
+
   return (
-    <div className="mx-auto min-h-screen max-w-[1440px] px-4 py-4 sm:px-6">
+    <div className="no-anchor mx-auto min-h-screen max-w-[1440px] px-4 py-4 sm:px-6">
       <header className="flex flex-col gap-3 border-b border-line pb-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-xs font-semibold tracking-[0.16em] text-clay uppercase">Single decree</p>
@@ -167,70 +204,68 @@ export function App() {
           </QuietButton>
           <QuietButton onClick={() => dispatch({ type: "scenario", id: scenario })}>Reset</QuietButton>
           <QuietButton
-            onClick={() =>
-              mutate((current) => {
-                const message = nextAutoMessage(current);
-                return message ? deliver(current, message.id) : current;
-              })
-            }
-            disabled={!nextAutoMessage(world)}
+            onClick={() => {
+              const message = nextAutoMessage(world);
+              if (message) startFlight(message.id);
+            }}
+            disabled={!nextAutoMessage(world) || packet !== null}
           >
             Step
           </QuietButton>
           <QuietButton pressed={state.autoplay} onClick={() => dispatch({ type: "autoplay", on: !state.autoplay })}>
             {state.autoplay ? "Stop" : "Autoplay"}
           </QuietButton>
-          <details className="relative">
-            <summary className="cursor-pointer list-none rounded-full border border-line bg-card px-3 py-1.5 text-sm font-semibold">
-              Network
-            </summary>
-            <div className="absolute right-0 z-20 mt-2 w-72 rounded-2xl border border-line bg-card p-3 text-sm shadow-sm">
-              <div className="flex flex-wrap gap-2">
-                <QuietButton onClick={() => mutate(heal)}>Heal</QuietButton>
-                <QuietButton onClick={() => mutate(splitThreeTwo)}>Split 3/2</QuietButton>
+          {showNetwork ? null : (
+            <details className="relative">
+              <summary className="cursor-pointer list-none rounded-full border border-line bg-card px-3 py-1.5 text-sm font-semibold">
+                Network
+              </summary>
+              <div className="absolute right-0 z-20 mt-2 w-[28rem] max-w-[90vw] rounded-2xl border border-line bg-card p-3 shadow-sm">
+                {network}
               </div>
-              <label className="mt-3 flex items-center justify-between gap-2 text-muted">
-                Cross-side messages
-                <select
-                  className="rounded-full border border-line bg-paper px-2 py-1 text-ink"
-                  value={world.partitionMode}
-                  onChange={(event) => mutate((current) => setPartitionMode(current, event.target.value === "drop" ? "drop" : "hold"))}
-                >
-                  <option value="hold">Hold</option>
-                  <option value="drop">Drop</option>
-                </select>
-              </label>
-              <div className="mt-3 grid gap-2">
-                {world.servers.map((item) => (
-                  <label key={item.id} className="flex items-center justify-between gap-2">
-                    <span>{item.id}</span>
-                    <select
-                      aria-label={`Side for ${item.id}`}
-                      className="rounded-full border border-line bg-paper px-2 py-1"
-                      value={item.partition}
-                      onChange={(event) => mutate((current) => setPartition(current, item.id, Number(event.target.value)))}
-                    >
-                      <option value={1}>Side 1</option>
-                      <option value={2}>Side 2</option>
-                      <option value={3}>Side 3</option>
-                    </select>
-                  </label>
-                ))}
-              </div>
-            </div>
-          </details>
+            </details>
+          )}
         </div>
       </header>
 
-      <details className="mt-2 text-sm text-muted">
-        <summary className="cursor-pointer text-ink">Rules in one minute</summary>
-        <ul className="mt-2 grid list-disc gap-1 pl-4">
-          <li>Ballots look like 1.A. Higher round wins. Same round, later letter wins.</li>
-          <li>The first three promises lock phase 2. A later promise does not rewrite it.</li>
-          <li>If that quorum reported an accept, the proposer must reuse the highest one.</li>
-          <li>Chosen means 3 of 5 acceptors wrote the same ballot and value. Learning it is separate.</li>
-        </ul>
-      </details>
+      {showNetwork ? <div className="mt-3">{network}</div> : null}
+
+      <div className="mt-2 flex flex-wrap gap-x-4 text-sm text-muted">
+        <details>
+          <summary className="cursor-pointer text-ink">Rules in one minute</summary>
+          <ul className="mt-2 grid list-disc gap-1 pl-4">
+            <li>Ballots look like 1.A. Higher round wins. Same round, later letter wins.</li>
+            <li>The first three promises lock phase 2. A later promise does not rewrite it.</li>
+            <li>If that quorum reported an accept, the proposer must reuse the highest one.</li>
+            <li>Chosen means 3 of 5 acceptors wrote the same ballot and value. Learning it is separate.</li>
+          </ul>
+        </details>
+        <details>
+          <summary className="cursor-pointer text-ink">Roles</summary>
+          <div className="mt-2 grid max-w-3xl gap-2">
+            <p>Every server is an acceptor. It can also propose, and it learns a value only when a Learn message or its own majority of Accepted replies tells it.</p>
+            <p>
+              In Paxos Made Moderately Complex, each server is a replica. A proposer acting as leader sends a scout for phase 1 and a commander for phase 2.
+              The icons on a Step animation are that role.
+            </p>
+            <ul className="flex flex-wrap gap-3">
+              {ROLE_LEGEND.map((role) => (
+                <li key={role.kind} className="flex items-center gap-2">
+                  <RoleGlyph kind={role.kind} />
+                  <span>
+                    <span className="font-semibold text-ink">{role.short}.</span> {role.caption}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <ul className="grid gap-1 text-ink">
+              {world.servers.map((item) => (
+                <li key={item.id}>{serverRoleLine(item)}</li>
+              ))}
+            </ul>
+          </div>
+        </details>
+      </div>
 
       <div className="mt-3 flex gap-2 overflow-x-auto" role="tablist" aria-label="Challenges">
         {SCENARIOS.map((item) => {
@@ -271,7 +306,9 @@ export function App() {
               : " Every server has learned it."}
           </>
         ) : (
-          <span className="text-muted">Nothing is chosen yet. A majority is {MAJORITY} of {SERVER_IDS.length}.</span>
+          <span className="text-muted">
+            Nothing is chosen yet. A majority is {MAJORITY} of {SERVER_IDS.length}.
+          </span>
         )}
       </p>
 
@@ -279,54 +316,47 @@ export function App() {
         <Timeline
           world={world}
           selectedServer={state.selected}
+          selectedMessageId={pin.kind === "message" ? pin.id : null}
+          packet={packet}
           onSelectServer={(id) => {
             dispatch({ type: "select", id });
             setPin({ kind: "server", id });
             setHover(null);
           }}
-          onActivateMessage={activateMessage}
-          onHover={setHover}
+          onSelectMessage={(id) => setPin({ kind: "message", id })}
+          onHover={onHover}
+          onDeliver={startFlight}
+          onDelay={(id) => mutate((current) => delay(current, id))}
+          onDrop={(id) => {
+            setPin({ kind: "server", id: state.selected });
+            mutate((current) => drop(current, id));
+          }}
         />
       </div>
 
-      <section className="mt-3 rounded-2xl border border-line bg-card p-4" aria-label="Selection">
+      <section className="no-anchor mt-3 rounded-2xl border border-line bg-card p-4" aria-label="Selection">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0 max-w-2xl">
+          <div className="h-28 min-w-0 max-w-2xl overflow-y-auto">
             <h2 className="font-serif text-xl">{explanationTitle}</h2>
-            <p className="mt-1 text-sm leading-relaxed" aria-live="polite">
-              {explanation}
-            </p>
+            <p className="mt-1 text-sm leading-relaxed">{explanation}</p>
           </div>
-          {activeQueued ? (
-            <MessageActions
-              held={deliveryBlock(world, activeQueued) === "held"}
-              offline={!world.servers.find((item) => item.id === activeQueued.to)?.online}
-              canDelay={world.queue[world.queue.length - 1]?.id !== activeQueued.id}
-              onDeliver={() => activateMessage(activeQueued.id)}
-              onDelay={() => mutate((current) => delay(current, activeQueued.id))}
-              onDrop={() => mutate((current) => drop(current, activeQueued.id))}
-            />
-          ) : pin.kind === "server" || hover !== null ? (
-            <ServerActions
-              serverId={server.id}
-              online={server.online}
-              promised={server.promised ? formatBallot(server.promised) : "none"}
-              accepted={server.accepted ? `“${server.accepted.value}” at ${formatBallot(server.accepted.ballot)}` : "nothing"}
-              knows={server.learned ? `“${server.learned.value}”` : "has not learned"}
-              draft={state.draft}
-              showSides={showNetwork}
-              partition={server.partition}
-              onDraft={(value) => dispatch({ type: "draft", value })}
-              onPropose={() => mutate((current) => propose(current, server.id, state.draft))}
-              onPower={() =>
-                mutate((current) => {
-                  const live = current.servers.find((item) => item.id === server.id);
-                  return live?.online ? crash(current, server.id) : restart(current, server.id);
-                })
-              }
-              onPartition={(partition) => mutate((current) => setPartition(current, server.id, partition))}
-            />
-          ) : null}
+          <ServerActions
+            serverId={server.id}
+            online={server.online}
+            promised={server.promised ? formatBallot(server.promised) : "none"}
+            accepted={server.accepted ? `“${server.accepted.value}” at ${formatBallot(server.accepted.ballot)}` : "nothing"}
+            knows={server.learned ? `“${server.learned.value}”` : "has not learned"}
+            role={serverRoleLine(server)}
+            draft={state.draft}
+            onDraft={(value) => dispatch({ type: "draft", value })}
+            onPropose={() => mutate((current) => propose(current, server.id, state.draft))}
+            onPower={() =>
+              mutate((current) => {
+                const live = current.servers.find((item) => item.id === server.id);
+                return live?.online ? crash(current, server.id) : restart(current, server.id);
+              })
+            }
+          />
         </div>
         <details className="mt-3 text-sm text-muted">
           <summary className="cursor-pointer">Earlier steps</summary>
@@ -341,36 +371,77 @@ export function App() {
   );
 }
 
-function MessageActions({
-  held,
-  offline,
-  canDelay,
-  onDeliver,
-  onDelay,
-  onDrop,
+function NetworkControls({
+  world,
+  selected,
+  onHeal,
+  onSplit,
+  onIsolate,
+  onMove,
+  onMode,
 }: {
-  held: boolean;
-  offline: boolean;
-  canDelay: boolean;
-  onDeliver: () => void;
-  onDelay: () => void;
-  onDrop: () => void;
+  world: World;
+  selected: ServerId;
+  onHeal: () => void;
+  onSplit: () => void;
+  onIsolate: () => void;
+  onMove: (id: ServerId) => void;
+  onMode: (mode: "hold" | "drop") => void;
+}) {
+  const together = world.servers.filter((item) => item.partition === 1);
+  const cutoff = world.servers.filter((item) => item.partition !== 1);
+  return (
+    <div className="grid gap-3" aria-label="Network">
+      <div className="flex flex-wrap items-center gap-2">
+        <QuietButton onClick={onHeal}>Heal all</QuietButton>
+        <QuietButton onClick={onSplit}>Split 3/2</QuietButton>
+        <QuietButton onClick={onIsolate}>Isolate {selected}</QuietButton>
+        <span className="ml-1 text-sm text-muted">Crossing messages</span>
+        <QuietButton pressed={world.partitionMode === "hold"} onClick={() => onMode("hold")}>
+          Hold
+        </QuietButton>
+        <QuietButton pressed={world.partitionMode === "drop"} onClick={() => onMode("drop")}>
+          Discard
+        </QuietButton>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <ServerGroup title="Together" empty="Nobody is in the main group." servers={together} onMove={onMove} />
+        <ServerGroup title="Cut off" empty="Nobody is cut off. Click a server to separate it." servers={cutoff} onMove={onMove} />
+      </div>
+    </div>
+  );
+}
+
+function ServerGroup({
+  title,
+  empty,
+  servers,
+  onMove,
+}: {
+  title: string;
+  empty: string;
+  servers: World["servers"];
+  onMove: (id: ServerId) => void;
 }) {
   return (
-    <div className="flex flex-wrap gap-2" aria-label="Message actions">
-      <button
-        type="button"
-        className="rounded-full bg-ink px-3 py-1.5 text-sm font-semibold text-card disabled:opacity-40"
-        disabled={held}
-        onClick={onDeliver}
-      >
-        {offline && !held ? "Deliver (drops)" : "Deliver"}
-      </button>
-      <QuietButton onClick={onDelay} disabled={!canDelay}>
-        Delay
-      </QuietButton>
-      <QuietButton onClick={onDrop}>Drop</QuietButton>
-      {held ? <span className="self-center text-xs text-gold">Held by the partition</span> : null}
+    <div className="rounded-2xl border border-line bg-paper px-3 py-2">
+      <p className="text-xs font-semibold tracking-wide text-muted uppercase">{title}</p>
+      {servers.length === 0 ? (
+        <p className="mt-1 text-sm text-muted">{empty}</p>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {servers.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="rounded-full border border-line bg-card px-3 py-1 font-serif text-lg"
+              onClick={() => onMove(item.id)}
+            >
+              {item.id}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -381,31 +452,27 @@ function ServerActions({
   promised,
   accepted,
   knows,
+  role,
   draft,
-  showSides,
-  partition,
   onDraft,
   onPropose,
   onPower,
-  onPartition,
 }: {
   serverId: ServerId;
   online: boolean;
   promised: string;
   accepted: string;
   knows: string;
+  role: string;
   draft: string;
-  showSides: boolean;
-  partition: number;
   onDraft: (value: string) => void;
   onPropose: () => void;
   onPower: () => void;
-  onPartition: (partition: number) => void;
 }) {
   return (
     <div className="grid justify-items-end gap-2">
       <p className="text-right text-xs text-muted">
-        Promised {promised} · Accepted {accepted} · {knows}
+        {role}. Promised {promised} · Accepted {accepted} · {knows}
       </p>
       <div className="flex flex-wrap justify-end gap-2">
         {PRESETS.map((preset) => (
@@ -438,18 +505,6 @@ function ServerActions({
           Propose from {serverId}
         </button>
         <QuietButton onClick={onPower}>{online ? "Crash" : "Restart"}</QuietButton>
-        {showSides ? (
-          <select
-            aria-label={`Side for ${serverId}`}
-            className="rounded-full border border-line bg-paper px-2 py-1 text-sm"
-            value={partition}
-            onChange={(event) => onPartition(Number(event.target.value))}
-          >
-            <option value={1}>Side 1</option>
-            <option value={2}>Side 2</option>
-            <option value={3}>Side 3</option>
-          </select>
-        ) : null}
       </div>
     </div>
   );
@@ -461,7 +516,7 @@ function QuietButton({
   disabled,
   pressed,
 }: {
-  children: string;
+  children: ReactNode;
   onClick: () => void;
   disabled?: boolean;
   pressed?: boolean;

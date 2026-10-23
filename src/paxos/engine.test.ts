@@ -8,6 +8,7 @@ import {
   deliver,
   drop,
   heal,
+  isolate,
   nextAutoMessage,
   propose,
   restart,
@@ -209,6 +210,15 @@ describe("crashes, drops, and partitions", () => {
     expect(busy.log.some((entry) => entry.text.includes("offline"))).toBe(true);
     expectSafe(world);
     expectSafe(busy);
+  });
+
+  it("isolates one server and leaves the other four together", () => {
+    const world = isolate(splitThreeTwo(createWorld()), "B");
+    const side = (id: string) => world.servers.find((server) => server.id === id)?.partition;
+    expect(side("B")).toBe(2);
+    expect(["A", "C", "D", "E"].map(side)).toEqual([1, 1, 1, 1]);
+    expect(isolate(world, "B")).toBe(world);
+    expectSafe(world);
   });
 
   it("holds cross-partition messages until the network heals", () => {

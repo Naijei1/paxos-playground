@@ -897,6 +897,37 @@ export function heal(world: World): World {
   return next;
 }
 
+export function isolate(world: World, id: ServerId): World {
+  const next = draft(world);
+  const time = ++next.diagram.clock;
+  let moved = false;
+  for (const item of next.servers) {
+    const partition = item.id === id ? 2 : 1;
+    if (item.partition === partition) continue;
+    moved = true;
+    item.partition = partition;
+    next.diagram.events.push({
+      id: `d${next.diagram.events.length + 1}`,
+      time,
+      server: item.id,
+      kind: "partition",
+      label: `side ${partition}`,
+      detail:
+        partition === 2
+          ? `${item.id} is cut off from the other servers.`
+          : `${item.id} stays with the majority while ${id} is isolated.`,
+      partition,
+    });
+  }
+  if (!moved) return world;
+  log(
+    next,
+    `${id} is isolated on side 2. The other four can still reach each other. ${id} cannot gather a majority of 3 by itself. Crossing messages are ${next.partitionMode === "hold" ? "held" : "dropped"}.`,
+    "key",
+  );
+  return next;
+}
+
 export function withIntro(world: World, intro: string, clearProposals = false): World {
   const next = draft(world);
   for (const message of next.queue) {
