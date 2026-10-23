@@ -99,9 +99,12 @@ export function App() {
   const [pin, setPin] = useState<Pin>({ kind: "server", id: server.id });
   const [hover, setHover] = useState<HoverState>(null);
   const [packet, setPacket] = useState<Packet | null>(null);
+  const [networkOpen, setNetworkOpen] = useState(false);
   const flying = useRef(false);
   const raf = useRef(0);
+  const flightGen = useRef(0);
   const showNetwork = scenario === "free" || scenario === "partition";
+  const animating = packet !== null;
 
   useEffect(() => {
     const onHash = () => {
@@ -116,22 +119,13 @@ export function App() {
   }, [dispatch]);
 
   useEffect(() => {
-    if (!state.autoplay) return;
-    const timer = window.setInterval(() => {
-      dispatch({
-        type: "mutate",
-        op: (current) => {
-          const message = nextAutoMessage(current);
-          return message ? deliver(current, message.id) : current;
-        },
-      });
-    }, 900);
-    return () => window.clearInterval(timer);
-  }, [state.autoplay, dispatch]);
-
-  useEffect(() => {
     setPin({ kind: "server", id: recommendedProposer(scenario) });
     setHover(null);
+    setNetworkOpen(false);
+    flightGen.current += 1;
+    flying.current = false;
+    cancelAnimationFrame(raf.current);
+    setPacket(null);
   }, [scenario]);
 
   useEffect(() => () => cancelAnimationFrame(raf.current), []);
@@ -157,10 +151,13 @@ export function App() {
       mutate((current) => deliver(current, messageId));
       return;
     }
+    const generation = flightGen.current + 1;
+    flightGen.current = generation;
     flying.current = true;
     const started = performance.now();
     const duration = 560;
     const tick = (now: number) => {
+      if (flightGen.current !== generation) return;
       const progress = Math.min(1, (now - started) / duration);
       setPacket({ messageId, progress });
       if (progress < 1) {
@@ -173,6 +170,14 @@ export function App() {
     };
     raf.current = requestAnimationFrame(tick);
   };
+
+  useEffect(() => {
+    if (!state.autoplay || animating || flying.current) return;
+    const message = nextAutoMessage(world);
+    if (!message) return;
+    const timer = window.setTimeout(() => startFlight(message.id), 240);
+    return () => window.clearTimeout(timer);
+  }, [state.autoplay, world, animating]);
 
   const network = (
     <NetworkControls
@@ -216,23 +221,32 @@ export function App() {
             {state.autoplay ? "Stop" : "Autoplay"}
           </QuietButton>
           {showNetwork ? null : (
-            <details className="relative">
-              <summary className="cursor-pointer list-none rounded-full border border-line bg-card px-3 py-1.5 text-sm font-semibold">
-                Network
-              </summary>
-              <div className="absolute right-0 z-20 mt-2 w-[28rem] max-w-[90vw] rounded-2xl border border-line bg-card p-3 shadow-sm">
-                {network}
-              </div>
-            </details>
+            <button
+              type="button"
+              className="btn btn-quiet rounded-full px-3 py-1.5 text-sm font-semibold"
+              aria-expanded={networkOpen}
+              aria-controls="network-sheet"
+              onClick={() => setNetworkOpen((open) => !open)}
+            >
+              Network
+            </button>
           )}
         </div>
       </header>
 
       {showNetwork ? <div className="mt-3">{network}</div> : null}
+      {networkOpen && !showNetwork ? (
+        <>
+          <button type="button" className="network-backdrop" aria-label="Close network" onClick={() => setNetworkOpen(false)} />
+          <div id="network-sheet" className="network-sheet" role="dialog" aria-label="Network">
+            {network}
+          </div>
+        </>
+      ) : null}
 
       <div className="mt-2 flex flex-wrap gap-x-4 text-sm text-muted">
         <details>
-          <summary className="cursor-pointer text-ink">Rules in one minute</summary>
+          <summary className="btn btn-ghost rounded-full px-2 py-1 text-ink">Rules in one minute</summary>
           <ul className="mt-2 grid list-disc gap-1 pl-4">
             <li>Ballots look like 1.A. Higher round wins. Same round, later letter wins.</li>
             <li>The first three promises lock phase 2. A later promise does not rewrite it.</li>
@@ -241,7 +255,7 @@ export function App() {
           </ul>
         </details>
         <details>
-          <summary className="cursor-pointer text-ink">Roles</summary>
+          <summary className="btn btn-ghost rounded-full px-2 py-1 text-ink">Roles</summary>
           <div className="mt-2 grid max-w-3xl gap-2">
             <p>Every server is an acceptor. It can also propose, and it learns a value only when a Learn message or its own majority of Accepted replies tells it.</p>
             <p>
@@ -267,7 +281,7 @@ export function App() {
         </details>
       </div>
 
-      <div className="mt-3 flex gap-2 overflow-x-auto" role="tablist" aria-label="Challenges">
+      <div className="mt-3 flex flex-wrap gap-2" role="tablist" aria-label="Challenges">
         {SCENARIOS.map((item) => {
           const selectedTab = item.id === scenario;
           return (
@@ -277,7 +291,7 @@ export function App() {
               role="tab"
               id={`tab-${item.id}`}
               aria-selected={selectedTab}
-              className={`shrink-0 rounded-full px-3 py-1 text-sm ${selectedTab ? "bg-ink text-card" : "text-muted hover:text-ink"}`}
+              className={`btn rounded-full px-3 py-1 text-sm ${selectedTab ? "btn-ink" : "btn-ghost"}`}
               onClick={() => {
                 const hash = hashForScenario(item.id);
                 if (window.location.hash === hash) dispatch({ type: "scenario", id: item.id });
@@ -290,13 +304,13 @@ export function App() {
         })}
       </div>
 
-      <section role="tabpanel" aria-labelledby={`tab-${scenario}`} className="mt-2">
+      <section role="tabpanel" aria-labelledby={`tab-${scenario}`} className="challenge-copy mt-2">
         <p className="max-w-4xl text-sm leading-relaxed">{active.goal}</p>
         <p className="mt-1 text-sm font-semibold text-pine">{progressLabel(scenario, world)}</p>
         {done && active.debrief ? <p className="mt-2 max-w-4xl text-sm leading-relaxed text-pine">{active.debrief}</p> : null}
       </section>
 
-      <p className="mt-3 text-sm" role="status" aria-label="Chosen value">
+      <p className="mt-3 min-h-12 text-sm" role="status" aria-label="Chosen value">
         {world.chosen ? (
           <>
             <span className="font-semibold text-pine">Chosen</span> “{world.chosen.value}” at {formatBallot(world.chosen.ballot)}, accepted by{" "}
@@ -359,7 +373,7 @@ export function App() {
           />
         </div>
         <details className="mt-3 text-sm text-muted">
-          <summary className="cursor-pointer">Earlier steps</summary>
+          <summary className="btn btn-ghost rounded-full px-2 py-1">Earlier steps</summary>
           <ol className="mt-2 max-h-48 space-y-1 overflow-auto">
             {world.log.map((entry) => (
               <li key={entry.id}>{entry.text}</li>
@@ -396,7 +410,9 @@ function NetworkControls({
         <QuietButton onClick={onHeal}>Heal all</QuietButton>
         <QuietButton onClick={onSplit}>Split 3/2</QuietButton>
         <QuietButton onClick={onIsolate}>Isolate {selected}</QuietButton>
-        <span className="ml-1 text-sm text-muted">Crossing messages</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-sm whitespace-nowrap text-muted">Crossing messages</span>
         <QuietButton pressed={world.partitionMode === "hold"} onClick={() => onMode("hold")}>
           Hold
         </QuietButton>
@@ -424,7 +440,7 @@ function ServerGroup({
   onMove: (id: ServerId) => void;
 }) {
   return (
-    <div className="rounded-2xl border border-line bg-paper px-3 py-2">
+    <div className="min-h-[4.75rem] rounded-2xl border border-line bg-paper px-3 py-2">
       <p className="text-xs font-semibold tracking-wide text-muted uppercase">{title}</p>
       {servers.length === 0 ? (
         <p className="mt-1 text-sm text-muted">{empty}</p>
@@ -434,7 +450,7 @@ function ServerGroup({
             <button
               key={item.id}
               type="button"
-              className="rounded-full border border-line bg-card px-3 py-1 font-serif text-lg"
+              className="btn btn-quiet rounded-full px-3 py-1 font-serif text-lg"
               onClick={() => onMove(item.id)}
             >
               {item.id}
@@ -480,7 +496,7 @@ function ServerActions({
             key={preset}
             type="button"
             aria-pressed={draft === preset}
-            className={`rounded-full px-2.5 py-1 text-sm ${draft === preset ? "bg-ink text-card" : "text-muted"}`}
+            className={`btn rounded-full px-2.5 py-1 text-sm ${draft === preset ? "btn-ink" : "btn-ghost"}`}
             onClick={() => onDraft(preset)}
           >
             {preset}
@@ -498,7 +514,7 @@ function ServerActions({
       <div className="flex flex-wrap justify-end gap-2">
         <button
           type="button"
-          className="rounded-full bg-clay px-3 py-1.5 text-sm font-semibold text-card disabled:opacity-40"
+          className="btn btn-clay rounded-full px-3 py-1.5 text-sm font-semibold"
           disabled={!online || draft.trim().length === 0}
           onClick={onPropose}
         >
@@ -527,9 +543,7 @@ function QuietButton({
       aria-pressed={pressed}
       disabled={disabled}
       onClick={onClick}
-      className={`rounded-full border px-3 py-1.5 text-sm font-semibold disabled:opacity-40 ${
-        pressed ? "border-ink bg-ink text-card" : "border-line bg-card text-ink"
-      }`}
+      className={`btn rounded-full px-3 py-1.5 text-sm font-semibold ${pressed ? "btn-ink" : "btn-quiet"}`}
     >
       {children}
     </button>
